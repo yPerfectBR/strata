@@ -594,6 +594,85 @@ fn pending_overflow_omits_new_subtrees_but_finishes_admitted_work() {
     );
 }
 
+/// Waits for the final snapshot of a background index walk (`indexing == false`).
+fn wait_for_completed_results(
+    receiver: &std::sync::mpsc::Receiver<SearchEvent>,
+) -> Option<SearchEvent> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    while std::time::Instant::now() < deadline {
+        if let Ok(event) = receiver.recv_timeout(Duration::from_millis(200))
+            && matches!(
+                event,
+                SearchEvent::Results {
+                    indexing: false,
+                    ..
+                }
+            )
+        {
+            return Some(event);
+        }
+    }
+    None
+}
+
+/// A tree whose folder frontier is wider than the old fixed queue of 4,096: 20 x 20 x 20 leaf
+/// folders (8,000) hang under 400 mid-level folders, so every level-2 folder is queued while
+/// level 3 is still being discovered.
+fn build_wide_frontier_tree(root: &Path) -> (PathBuf, PathBuf) {
+    for a in 0..20 {
+        for b in 0..20 {
+            for c in 0..20 {
+                fs::create_dir_all(root.join(format!("proj{a:02}/mod{b:02}/sub{c:02}")))
+                    .expect("fixture folder");
+            }
+        }
+    }
+    // Early in traversal order (proj02) and late (proj18): both must be found.
+    let early = fixture_file(root, "proj02/mod19/sub03/needle-frontier-early.txt");
+    let late = fixture_file(root, "proj18/mod07/sub11/needle-frontier-late.txt");
+    (early, late)
+}
+
+fn assert_wide_frontier_is_complete(limits: SearchLimits, label: &str) {
+    let root = unique_fixture_root(label);
+    let (early, late) = build_wide_frontier_tree(&root);
+
+    let (search, events) = super::index_filter(root.clone(), false, true, limits);
+    search.query("needle-frontier");
+    let SearchEvent::Results {
+        items, coverage, ..
+    } = wait_for_completed_results(&events).expect("completed results");
+    drop(search);
+    fs::remove_dir_all(root).expect("remove fixture");
+
+    assert!(
+        !coverage.directory_limit,
+        "folders were omitted: {coverage:?}"
+    );
+    assert!(!coverage.is_partial(), "unexpected coverage: {coverage:?}");
+    for target in [early, late] {
+        assert!(
+            items.iter().any(|item| item.path == target),
+            "missing {}",
+            target.display()
+        );
+    }
+}
+
+#[test]
+fn folder_filter_finds_everything_when_the_folder_frontier_exceeds_four_thousand() {
+    assert_wide_frontier_is_complete(SearchLimits::default(), "wide-frontier-default");
+}
+
+#[test]
+fn raising_the_entry_limit_also_raises_the_pending_folder_limit() {
+    let limits = SearchLimits {
+        time_budget: None,
+        max_entries: Some(1_000_000),
+    };
+    assert_wide_frontier_is_complete(limits, "wide-frontier-raised");
+}
+
 #[test]
 fn nested_ignore_rules_are_preserved_by_fair_directory_scheduling() {
     let root = unique_fixture_root("fair-ignore");

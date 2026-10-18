@@ -51,7 +51,12 @@ const MAX_INDEX_ENTRIES: usize = 200_000;
 const MAX_INDEX_DEPTH: usize = 64;
 const INDEX_TIME_BUDGET: Duration = Duration::from_secs(10);
 const INITIAL_DIRECTORY_BATCH: usize = 1;
-const MAX_PENDING_DIRECTORIES: usize = 4_096;
+/// Folders queued at once. Each queued folder was already admitted as an index entry, so the
+/// entry budget is the natural bound: a fixed, smaller queue silently dropped whole subtrees on
+/// wide trees (a 20 x 20 x 20 layout queues 8,000 folders) long before any limit the user can
+/// see or change. Scaling it with the entry limit keeps memory bounded the same way and makes
+/// the "entry limit reached" hint, with its Settings pointer, the one that fires.
+const MAX_PENDING_DIRECTORIES: usize = MAX_INDEX_ENTRIES;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct TraversalBudget {
@@ -74,9 +79,12 @@ impl TraversalBudget {
     }
 
     fn with_limits(limits: SearchLimits) -> Self {
+        let max_entries = limits.max_entries.unwrap_or(usize::MAX);
         Self {
-            max_entries: limits.max_entries.unwrap_or(usize::MAX),
+            max_entries,
             time_budget: limits.time_budget.unwrap_or(Duration::MAX),
+            // At most one queued folder per admitted entry (see `MAX_PENDING_DIRECTORIES`).
+            max_pending_directories: max_entries,
             ..Self::standard()
         }
     }
