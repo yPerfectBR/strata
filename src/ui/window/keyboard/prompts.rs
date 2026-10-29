@@ -20,7 +20,7 @@ use crate::{
     model::{FileEntry, Location},
     services::NavigationHistory,
     ui::{
-        browser::{BrowserView, CreateRefusal, typed_rename_is_taken},
+        browser::{BrowserView, CreateRefusal},
         folder_picker::{self, FolderPicker, Refused, Request},
         keys::{KeyPress, bindings::*},
         shortcut_footer::{CandidateKeys, ShortcutFooter},
@@ -39,33 +39,38 @@ impl Dispatcher {
             self.shortcuts.open_prompt(Prompt::Find);
         } else if press.is(FIND_BACKWARD) {
             self.shortcuts.open_prompt(Prompt::FindBackward);
-        } else if press.is_any(&[JUMP_VISITED, JUMP_RECENT]) {
-            let kind = if press.is(JUMP_VISITED) {
-                Prompt::Jump
-            } else {
-                Prompt::Recent
-            };
-            self.shortcuts.open_prompt(kind);
-            let browser = self.view.browser();
-            show_history_candidates(&self.shortcuts, &self.history, &browser, kind);
+        } else if press.is(JUMP_VISITED) {
+            self.open_history_prompt(Prompt::Jump);
+        } else if press.is(JUMP_RECENT) {
+            self.open_history_prompt(Prompt::Recent);
         } else if press.is_any(&[REPEAT_FIND, REPEAT_FIND_REVERSED]) {
             self.repeat_find(press.is(REPEAT_FIND_REVERSED));
-        } else if press.is(FILTER_LISTING) {
+        } else if press.is(FILTER) {
             let query = self.view.listing_filter().unwrap_or_default();
             self.shortcuts.open_prompt_with(Prompt::Filter, &query);
         } else if press.is(SEARCH_SUBFOLDERS) {
-            match self.view.begin_listing_search() {
-                Some(query) => {
-                    self.shortcuts.open_prompt_with(Prompt::Search, &query);
-                }
-                None => self
-                    .shortcuts
-                    .show_feedback(&crate::i18n::tr("Nothing to search")),
-            }
+            self.open_search_prompt();
         } else {
             return None;
         }
         Some(Propagation::Stop)
+    }
+
+    pub(super) fn open_history_prompt(&self, kind: Prompt) {
+        self.shortcuts.open_prompt(kind);
+        let browser = self.view.browser();
+        show_history_candidates(&self.shortcuts, &self.history, &browser, kind);
+    }
+
+    pub(super) fn open_search_prompt(&self) {
+        match self.view.begin_listing_search() {
+            Some(query) => {
+                self.shortcuts.open_prompt_with(Prompt::Search, &query);
+            }
+            None => self
+                .shortcuts
+                .show_feedback(&crate::i18n::tr("Nothing to search")),
+        }
     }
 
     fn repeat_find(&self, reverse: bool) {
@@ -311,9 +316,11 @@ impl Dispatcher {
             };
             let taken = match paths {
                 Some((current, wanted)) if unstorable.is_none() => {
-                    gtk::gio::spawn_blocking(move || typed_rename_is_taken(&current, &wanted))
-                        .await
-                        .unwrap_or(false)
+                    gtk::gio::spawn_blocking(move || {
+                        crate::adapters::typed_rename_is_taken(&current, &wanted)
+                    })
+                    .await
+                    .unwrap_or(false)
                 }
                 _ => false,
             };

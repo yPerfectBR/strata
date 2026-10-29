@@ -74,6 +74,7 @@ fn install_hub() {
                 disconnected: false,
                 last_busy: None,
             }],
+            retiring: Vec::new(),
             slots: Default::default(),
             pending: Default::default(),
             serial: 0,
@@ -537,6 +538,125 @@ fn send_to_placement_fills_provider_submenus_or_falls_back_to_the_group() {
 }
 
 #[test]
+fn send_to_entry_is_a_single_item_only_while_it_is_the_providers_only_destination() {
+    crate::test_support::gtk_test(
+        "ui::file_providers::tests::send_to_entry_is_a_single_item_only_while_it_is_the_providers_only_destination",
+        || {
+            install_hub();
+            with_hub(|hub| {
+                hub.providers[0].category =
+                    Some(crate::services::integration_catalog::Category::Devices)
+            });
+            let placed = |id: &str, label: &str, placement, children| {
+                let mut action = action(id, label, children);
+                action.placement = Some(placement);
+                action
+            };
+            let string = |model: &gio::MenuModel, index: i32, attribute: &str| {
+                model
+                    .item_attribute_value(index, attribute, None)
+                    .and_then(|value| value.get::<String>())
+            };
+            let group = gio::SimpleActionGroup::new();
+            let model = gio::Menu::new();
+            let send_to = gio::Menu::new();
+            let mut renderer = menus::Renderer::new(
+                (model.clone(), Some(send_to.clone())),
+                group.clone(),
+                glib::WeakRef::new(),
+                glib::WeakRef::new(),
+                (vec!["/file".into()], false),
+                Rc::new(Cell::new(1)),
+                1,
+            );
+            let open = placed("open", "Open", Placement::SendToEntry, None);
+            assert!(renderer.update(vec![(0, open.clone())]));
+            assert_eq!(model.n_items(), 0);
+            assert_eq!(send_to.n_items(), 1);
+            assert_eq!(
+                string(send_to.upcast_ref(), 0, "label").as_deref(),
+                Some("Open")
+            );
+            assert_eq!(
+                string(send_to.upcast_ref(), 0, "action").as_deref(),
+                Some("provider.action-0-open"),
+                "the entry activates directly"
+            );
+            assert!(send_to.item_link(0, "submenu").is_none());
+            assert_eq!(
+                send_to
+                    .item_attribute_value(0, "x-strata-send-to-device", None)
+                    .and_then(|value| value.get::<bool>()),
+                Some(true)
+            );
+            let icon = send_to
+                .item_attribute_value(0, "icon", None)
+                .and_then(|icon| gio::Icon::deserialize(&icon))
+                .and_downcast::<gio::ThemedIcon>()
+                .expect("entry icon");
+            assert_eq!(
+                icon.names().first().map(|name| name.as_str()),
+                Some(crate::assets::icons::SMARTPHONE),
+                "an entry without its own icon is drawn like the provider's submenu"
+            );
+            let leaf = group.lookup_action("action-0-open").expect("entry leaf");
+
+            assert!(renderer.update(vec![(
+                0,
+                placed("open", "LocalSend", Placement::SendToEntry, None)
+            )]));
+            assert_eq!(
+                string(send_to.upcast_ref(), 0, "label").as_deref(),
+                Some("LocalSend")
+            );
+            assert_eq!(group.lookup_action("action-0-open"), Some(leaf.clone()));
+            assert!(leaf.is_enabled());
+
+            let pixel = placed("pixel", "Pixel", Placement::SendTo, None);
+            assert!(renderer.update(vec![(0, open.clone()), (0, pixel.clone())]));
+            assert_eq!(send_to.n_items(), 1);
+            assert_eq!(
+                string(send_to.upcast_ref(), 0, "label").as_deref(),
+                Some("Example Cloud"),
+                "several destinations fall back to the provider submenu"
+            );
+            let submenu = send_to.item_link(0, "submenu").expect("provider submenu");
+            assert_eq!(string(&submenu, 0, "label").as_deref(), Some("Open"));
+            assert_eq!(string(&submenu, 1, "label").as_deref(), Some("Pixel"));
+
+            for single in [
+                pixel,
+                placed(
+                    "open",
+                    "Open",
+                    Placement::SendToEntry,
+                    Some(vec![action("there", "There", None)]),
+                ),
+            ] {
+                renderer.update(vec![(0, single)]);
+                assert_eq!(
+                    string(send_to.upcast_ref(), 0, "label").as_deref(),
+                    Some("Example Cloud"),
+                    "one destination or branch stays in the submenu"
+                );
+                assert!(send_to.item_link(0, "submenu").is_some());
+            }
+
+            assert!(renderer.update(vec![(0, open)]));
+            assert_eq!(
+                string(send_to.upcast_ref(), 0, "label").as_deref(),
+                Some("Open")
+            );
+            assert!(send_to.item_link(0, "submenu").is_none());
+            assert!(renderer.update(Vec::new()));
+            assert_eq!(send_to.n_items(), 0);
+            assert!(group.list_actions().is_empty());
+            HUB.with(|cell| cell.replace(None));
+        },
+    );
+}
+
+#[test]
 fn retired_menu_does_not_remove_replacement_menu_actions() {
     crate::test_support::gtk_test(
         "ui::file_providers::tests::retired_menu_does_not_remove_replacement_menu_actions",
@@ -840,6 +960,62 @@ for line in sys.stdin:
 }
 
 #[test]
+fn a_reload_still_shows_the_outcome_of_a_pending_activation() {
+    crate::test_support::gtk_test(
+        "ui::file_providers::tests::a_reload_still_shows_the_outcome_of_a_pending_activation",
+        || {
+            for (action, notice, dialog) in [("reply", true, false), ("exit", false, true)] {
+                install_hub();
+                let fixture = tempfile::tempdir().expect("fixture");
+                let release = fixture.path().join("release");
+                let script = format!(
+                    r#"import json,os,sys,time
+for line in sys.stdin:
+ r=json.loads(line)
+ while not os.path.exists({release:?}): time.sleep(0.01)
+ if r['action']=='exit': sys.exit()
+ print(json.dumps({{'version':1,'id':r['id'],'message':'Link copied','outcome':{{'status':'accepted','accepted':1,'total':1}},'feedback':'notice'}}),flush=True)
+"#
+                );
+                with_hub(|hub| start_scripted_provider(hub, &script));
+                let overlay = gtk::Overlay::new();
+                overlay.set_child(Some(&gtk::Label::new(None)));
+                let owner: gtk::Widget = overlay.clone().upcast();
+                with_hub(|hub| {
+                    let mut activation = request("activate", vec!["/file".into()], false);
+                    activation.action = Some(action.into());
+                    hub.send(0, activation, Pending::Activate(0, owner.downgrade()));
+                });
+                let (sender, discovery) = mpsc::channel();
+                with_hub(|hub| hub.reload(discovery));
+                sender.send(Vec::new()).expect("discovery result");
+                std::fs::write(&release, "go").expect("release provider");
+
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while tick_hub() == glib::ControlFlow::Continue {
+                    assert!(
+                        Instant::now() < deadline,
+                        "{action}: the pending activation was not settled after a reload"
+                    );
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                let (docks, dialogs): (Vec<_>, Vec<_>) = overlay_layers(&overlay)
+                    .into_iter()
+                    .partition(|layer| layer.has_css_class("file-operation-dock"));
+                let notices = docks
+                    .iter()
+                    .filter_map(|dock| dock.first_child()?.first_child()?.first_child())
+                    .filter(|row| row.has_css_class("overlay-notice"))
+                    .count();
+                assert_eq!(notices, usize::from(notice), "{action} notice");
+                assert_eq!(dialogs.len(), usize::from(dialog), "{action} dialog");
+                HUB.with(|cell| cell.replace(None));
+            }
+        },
+    );
+}
+
+#[test]
 fn provider_icon_heading_keeps_the_name_and_action_positions() {
     crate::test_support::gtk_test(
         "ui::file_providers::tests::provider_icon_heading_keeps_the_name_and_action_positions",
@@ -920,6 +1096,7 @@ fn hub_timer_stops_and_tracking_ends_once_discovery_finds_no_providers() {
                     discovery,
                     discovered: false,
                     providers: Vec::new(),
+                    retiring: Vec::new(),
                     slots: Default::default(),
                     pending: Default::default(),
                     serial: 0,

@@ -27,6 +27,7 @@ pub(crate) fn entry(location: crate::model::Location) -> crate::model::FileEntry
         image_dimensions: MetadataValue::Unknown,
         child_count: MetadataValue::Unknown,
         duration_seconds: MetadataValue::Unknown,
+        listable: MetadataValue::Unknown,
         recent_uri: None,
     }
 }
@@ -124,6 +125,9 @@ impl OperationProvider for HeldOperations {
         self.hold(request.id, callback)
     }
     fn restore(&self, request: RestoreRequest, callback: Callback) -> LoadHandle {
+        self.hold(request.id, callback)
+    }
+    fn recover(&self, request: RecoverRequest, callback: Callback) -> LoadHandle {
         self.hold(request.id, callback)
     }
 }

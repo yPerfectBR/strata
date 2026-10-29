@@ -51,10 +51,22 @@ packages = { pacman = "kdeconnect", apt = "kdeconnect", dnf = "kdeconnect", zypp
 [[requirements]]
 module = "gi"                     # top-level; asked of the interpreter, never imported
 packages = { pacman = "python-gobject", apt = "python3-gi", dnf = "python3-gobject", zypper = "python3-gobject" }
+
+[[requirements]]
+command = "localsend"
+alternatives = ["localsend_app"]  # up to four other names for the same program
 ```
 
+A command is found when one of its names sits in a trusted system directory
+(`/usr/bin`, `/bin` and the NixOS profile directories). Its real path must lie
+under one of those directories or a Nix or Guix store, or be owned by root, with
+every directory above it, none writable by group or others, as with programs
+that packages install under `/opt` or `/usr/lib` and link into `/usr/bin`. A
+provider that runs the command should resolve it the same way; the LocalSend
+provider shows how.
+
 `name` and `description` are Strata interface text: add them to every catalog
-under `data/locales/` in all twelve languages (see
+under `data/locales/` in all thirteen languages (see
 [Internationalization](../docs/internationalization.md)). Messages the provider
 itself returns stay with the provider; follow the system locale as the protocol
 documentation describes.
@@ -84,8 +96,8 @@ replaced. There is no version field to bump.
   Ubuntu packages the tests need in `tests/apt-packages.txt`. They run in the
   `Integrations` workflow when files under `integrations/` change. The
   Rust suite checks that every bundled entry parses and stays within the
-  manifest bounds; the E2E suite exercises the Settings page with a fixture
-  catalog, not with bundled entries.
+  manifest bounds; `./scripts/test-headless.py integrations` covers the
+  Settings page.
 - **No network at review time.** Reviewers run the provider against a mock or
   local service, as the KDE Connect tests do with a private D-Bus daemon.
 

@@ -22,22 +22,20 @@ use rustix::{
 };
 
 use super::super::{
-    copy_engine::{refusal_reason, refuses_name, refuses_node, taken},
+    copy_engine::{holds_no_links, refusal_reason, refuses_name, refuses_node, taken},
     fs_ops::{Entry, fs},
     mount_profile::{FolderRules, NamePolicy, Site},
     names::{
         fix::{Fixed, fix_name},
-        numbered_name, stricter_names,
+        numbered_name, stricter_names, with_number,
     },
-    placement::{
-        EXTRACTION_STAGE_PREFIX, NUMBERED_NAME_ATTEMPTS, PlaceError, creation_error, place,
-        reserve_hidden_name,
-    },
+    placement::{NUMBERED_NAME_ATTEMPTS, PlaceError, creation_error, place, reserve_hidden_name},
     placement_reason,
 };
 use super::{ArchiveError, extraction::MemberMetadata};
 use crate::{
     adapters::volume::{NameLimit, Strictness},
+    model::hidden_names::HiddenName,
     services::{NameMode, RenameCause, error_detail},
 };
 
@@ -96,15 +94,23 @@ fn set_times(file: BorrowedFd<'_>, times: &rustix::fs::Timestamps) -> rustix::io
     )
 }
 
+/// True when `name` is only the archive root (`.`, `./`, `././`, or the same name with `\`).
+pub(super) fn names_archive_root(name: impl AsRef<OsStr>) -> bool {
+    Path::new(OsStr::from_bytes(&slash_separated(name.as_ref()))) == Path::new(".")
+}
+
+fn slash_separated(name: &OsStr) -> Vec<u8> {
+    name.as_bytes()
+        .iter()
+        .map(|byte| if *byte == b'\\' { b'/' } else { *byte })
+        .collect()
+}
+
 /// Clamp parent traversal at the extraction root so one such member does not abort the archive.
 pub(super) fn sanitized_archive_path(name: impl AsRef<OsStr>) -> Result<PathBuf, String> {
     let native = name.as_ref();
     let name = native.to_string_lossy();
-    let normalized: Vec<_> = native
-        .as_bytes()
-        .iter()
-        .map(|byte| if *byte == b'\\' { b'/' } else { *byte })
-        .collect();
+    let normalized = slash_separated(native);
     if normalized.is_empty() || normalized.starts_with(b"/") {
         return Err(unsafe_archive_path(&name));
     }
@@ -116,7 +122,12 @@ pub(super) fn sanitized_archive_path(name: impl AsRef<OsStr>) -> Result<PathBuf,
             b".." => {
                 path.pop();
             }
-            bytes if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' => {
+            bytes
+                if path.as_os_str().is_empty()
+                    && bytes.len() >= 2
+                    && bytes[0].is_ascii_alphabetic()
+                    && bytes[1] == b':' =>
+            {
                 return Err(unsafe_archive_path(&name));
             }
             _ => path.push(OsStr::from_bytes(component)),
@@ -140,6 +151,11 @@ fn staging_creation_failed(error: &str) -> String {
         error = error
     )
     .into_owned()
+}
+
+// vfat answers `EPERM`, exfat-fuse `ENOSYS` and SMB `EOPNOTSUPP`.
+fn holds_no_hard_links(error: Errno) -> bool {
+    error == Errno::PERM || holds_no_links(error)
 }
 
 fn errno_text(error: rustix::io::Errno) -> String {
@@ -177,18 +193,6 @@ fn no_available_name(name: &OsStr) -> String {
         name = name.to_string_lossy()
     )
     .into_owned()
-}
-
-/// Appends ` ({index})` to a directory name, or inserts it before a file's
-/// extension, cutting the stem to `limit`: `pkg-1.2.3 (2)`, `readme (2).txt`.
-fn suffixed_name(name: &OsStr, index: u64, is_directory: bool, limit: NameLimit) -> OsString {
-    let path = Path::new(name);
-    let stem = match path.extension() {
-        Some(_) if !is_directory => path.file_stem().unwrap_or(name),
-        _ => name,
-    };
-    let extension = OsStr::from_bytes(&name.as_bytes()[stem.len()..]);
-    numbered_name(stem, index, extension, limit, is_directory)
 }
 
 pub(super) fn archive_stem(archive_name: &str) -> &str {
@@ -268,7 +272,7 @@ impl ExtractionDestination {
     }
 
     pub(super) fn create_staging(&self) -> Result<(OsString, Self), String> {
-        let (name, ()) = reserve_hidden_name(EXTRACTION_STAGE_PREFIX, |name| {
+        let (name, ()) = reserve_hidden_name(HiddenName::Extraction, |name| {
             fs().mkdir(
                 Entry::new(&self.root, name),
                 rustix::fs::Mode::from_raw_mode(0o777),
@@ -384,7 +388,7 @@ impl ExtractionDestination {
             let candidate = if index == 1 {
                 leaf.to_owned()
             } else {
-                suffixed_name(leaf, index, is_directory, self.name_limit())
+                with_number(leaf, index, is_directory, self.name_limit())
             };
             match place_without_replacing(&staging.root, root.as_os_str(), &self.root, &candidate) {
                 Ok(()) => return Ok(candidate),
@@ -559,12 +563,29 @@ impl ExtractionDestination {
             .map_err(unavailable)?;
         fs().link(Entry::new(&target_parent, target_name), placed.entry())
             .map_err(|error| {
+                if !taken(fs(), placed.entry(), error) && holds_no_hard_links(error) {
+                    return Unmade::Unheld(error);
+                }
                 Unmade::of(
                     placed.parent.as_fd(),
                     error,
                     hard_link_failed(&placed.path, target, &errno_detail(error)),
                 )
             })
+    }
+
+    /// The extracted regular file at `path` and its size. A folder there gives
+    /// `None`; a link is not followed and fails to open.
+    pub(super) fn open_extracted(
+        &self,
+        path: &Path,
+    ) -> Result<Option<(std::fs::File, u64)>, String> {
+        let name = path.file_name().ok_or_else(no_file_name)?;
+        let parent = self.open_directory(path.parent().unwrap_or_else(|| Path::new("")))?;
+        Ok(fs()
+            .open_source(Entry::new(&parent, name), false)
+            .map_err(errno_text)?
+            .map(|(file, stat)| (std::fs::File::from(file), stat.size)))
     }
 
     pub(super) fn apply_directory_metadata(
@@ -686,7 +707,8 @@ impl Unmade {
     pub(super) fn worded(self, failed: impl FnOnce(&str) -> String) -> Self {
         match self {
             Self::Refused(error) => Self::Failed(failed(&error_detail(refusal_reason(error)))),
-            unmade => unmade,
+            Self::Unheld(error) => Self::Failed(failed(&errno_detail(error))),
+            unmade @ Self::Failed(_) => unmade,
         }
     }
 }
@@ -1004,7 +1026,7 @@ impl ExtractNameResolver {
             let candidate = if index == 1 {
                 base.to_os_string()
             } else {
-                suffixed_name(base, index, is_directory, limit)
+                with_number(base, index, is_directory, limit)
             };
             match self.taken.get(&(folder, candidate.clone())) {
                 Some(owner) if is_directory && owner == name => {

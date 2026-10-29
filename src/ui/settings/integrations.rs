@@ -27,6 +27,7 @@ mod tests;
 
 const TITLE: &str = "Integrations";
 const CARD_CHARS: i32 = 28;
+const MAX_COLUMNS: u32 = 3;
 
 type Checker = Arc<dyn Fn(&Entry) -> Vec<RequirementResult> + Send + Sync>;
 
@@ -106,9 +107,9 @@ pub(super) fn integrations_page_with(source: Source) -> gtk::Widget {
         .column_spacing(12)
         .row_spacing(12)
         .min_children_per_line(1)
-        .max_children_per_line(3)
+        .max_children_per_line(MAX_COLUMNS)
         .selection_mode(gtk::SelectionMode::None)
-        .homogeneous(false)
+        .homogeneous(true)
         .build();
     grid.add_css_class("integration-grid");
     search::tag(&grid, TITLE);
@@ -141,7 +142,7 @@ pub(super) fn integrations_page_with(source: Source) -> gtk::Widget {
         filter,
         expanded: RefCell::default(),
         requirements: RefCell::default(),
-        manager: PackageManager::detect(),
+        manager: Cell::new(None),
         generation: Cell::new(0),
     });
     let refresh = icon_label_button(icons::REFRESH, "Refresh");
@@ -195,7 +196,7 @@ struct Page {
     expanded: RefCell<HashSet<String>>,
     /// Requirement results by entry id, filled by a worker after the first build.
     requirements: RefCell<HashMap<String, Vec<RequirementResult>>>,
-    manager: Option<PackageManager>,
+    manager: Cell<Option<PackageManager>>,
     generation: Cell<u64>,
 }
 
@@ -230,7 +231,7 @@ impl Page {
                     let catalog: Vec<Entry> = rows.iter().map(|row| row.entry.clone()).collect();
                     integration_catalog::manual_installations(root, &catalog)
                 });
-                (rows, manual)
+                (rows, manual, PackageManager::detect())
             })
             .await;
             let Some(page) = page.upgrade() else {
@@ -239,7 +240,8 @@ impl Page {
             if page.generation.get() != generation {
                 return;
             }
-            if let Ok((rows, manual)) = scanned {
+            if let Ok((rows, manual, manager)) = scanned {
+                page.manager.set(manager);
                 page.show(rows, manual);
             }
         });
@@ -323,7 +325,7 @@ impl Page {
             self.filter.category.set(None);
         }
         self.show_filters(rows);
-        self.grid.invalidate_filter();
+        self.apply_filter();
         self.empty.set_visible(rows.is_empty());
     }
 
@@ -369,11 +371,25 @@ impl Page {
                     && chip.is_active()
                 {
                     page.filter.category.set(category);
-                    page.grid.invalidate_filter();
+                    page.apply_filter();
                 }
             });
             self.filters.append(&chip);
         }
+    }
+
+    fn apply_filter(&self) {
+        let shown = self
+            .filter
+            .cards
+            .borrow()
+            .keys()
+            .filter(|card| self.filter.matches(card))
+            .count();
+        // FlowBox keeps space for empty columns, so cap them at the cards shown.
+        self.grid
+            .set_max_children_per_line((shown as u32).clamp(1, MAX_COLUMNS));
+        self.grid.invalidate_filter();
     }
 
     fn check(self: &Rc<Self>, entries: Vec<Entry>) {
@@ -597,7 +613,7 @@ impl Page {
             );
             chips.append(&chip);
             if !result.satisfied
-                && let Some(command) = result.requirement.install_command(self.manager)
+                && let Some(command) = result.requirement.install_command(self.manager.get())
                 && !hints.contains(&command)
             {
                 hints.push(command);

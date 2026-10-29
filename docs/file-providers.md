@@ -145,12 +145,28 @@ in a submenu named after the provider and drawn with its icon, like a drive, so
 labels should be the bare destination name. **Send to…** appears as soon as any
 destination exists, including ones that arrive while the menu is open, and
 disappears when the last one is withdrawn. Destinations may have `children`, with the usual tree
-bounds, and their leaves activate exactly like section leaves. `placement` is
-read on root actions only; it is ignored on children, on background (folder)
-menus and in menus without a Send to… entry, where the action stays in the
-provider section. Unrecognized values also keep the section, so a provider that
-uses `placement` degrades to a heading section on older Strata versions without
-a handshake.
+bounds, and their leaves activate exactly like section leaves.
+
+A provider whose Send to… item is one action rather than a list of destinations,
+such as handing the selection to an app that has its own device picker, uses
+`send-to-entry` instead. The leaf then *is* the provider's item in **Send to…**,
+with its own label, and with the provider's icon when it declares none:
+
+```json
+{"version":1,"id":2,"actions":[{"id":"open","label":"LocalSend","placement":"send-to-entry","context":"opaque-selection-token"}]}
+```
+
+The provider chooses its presentation; Strata never collapses a submenu that
+holds one `send-to` destination. A `send-to-entry` action is drawn as an entry
+only while it is the provider's sole Send to… action and has no `children`;
+otherwise it joins that provider's submenu like a `send-to` destination.
+
+`placement` is read on root actions only; it is ignored on children, on
+background (folder) menus and in menus without a Send to… entry, where the
+action stays in the provider section. Unrecognized values also keep the section,
+so a provider that uses `placement` degrades to a heading section on older
+Strata versions without a handshake; Strata versions before `send-to-entry`
+treat it that way.
 
 Each menu and activation describes the whole selection, never a silently filtered
 subset. An adapter may support cross-account selections; otherwise return no
@@ -268,8 +284,10 @@ or a capabilities request. A future optional negotiation must preserve that base
 ## Bounds and failure behavior
 
 At most eight registrations are loaded (from at most 64 directory entries), with
-one child per provider. Strata sends **one request at a time** on each connection;
-serial adapters are supported, and events may arrive at any time. It queues up to
+one child per provider, except that after **Refresh** a child still answering an
+activation keeps running beside its replacement until that action settles.
+Strata sends **one request at a time** on each connection; serial adapters are
+supported, and events may arrive at any time. It queues up to
 16 speculative query/menu requests and eight activations separately. User actions
 have dispatch priority after the current request; pending refreshes for the same
 visible path/menu are coalesced by the host. A full queue rejects admission, never
@@ -317,11 +335,11 @@ recursive action retirement, tracking admission and window remapping.
 `./scripts/test-headless.py integration_catalog` covers catalog parsing and bounds,
 installation records, update and edit detection, and that every bundled entry
 parses and is translated; `./scripts/test-headless.py integrations` covers the
-Settings page. `./scripts/e2e.sh tests/e2e/scenarios/test_file_providers.py`
-exercises live menu refresh and withdrawal, sustained events, overlapping
-providers, mixed selections and flat/nested leaf activation through the actual
-GUI, and `tests/e2e/scenarios/test_integrations.py` installs, updates and
-removes a fixture catalog entry from Settings.
-The normal pinned quality and E2E checks remain required for this cross-cutting
+Settings page. The QA scenarios in `tests/qa/scenarios/file_providers/`
+(`./scripts/qa.sh provider-updates-open-menu`, for one) exercise live menu
+refresh and withdrawal, sustained events, overlapping providers, mixed
+selections and flat/nested leaf activation through the actual GUI. Installing,
+updating and removing a catalog entry from Settings has no GUI scenario.
+The normal pinned quality and QA checks remain required for this cross-cutting
 change. Use private display/configuration environments; do not test by changing
 the default file manager or loading fixtures into a user's installed application.

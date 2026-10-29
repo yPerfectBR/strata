@@ -84,7 +84,9 @@ fn archive_paths_are_sanitized_to_confined_relative_paths() -> Result<(), Box<dy
         "\\tmp\\marker",
         "C:\\tmp\\marker",
         "C:marker",
-        "safe/C:/marker",
+        "C:/evil.txt",
+        "./c:notes",
+        "safe/../c:notes",
         "\\\\server\\share\\marker",
         "//server/share/marker",
     ] {
@@ -96,6 +98,10 @@ fn archive_paths_are_sanitized_to_confined_relative_paths() -> Result<(), Box<dy
         ("safe/../../marker", "marker"),
         ("safe\\..\\..\\marker", "marker"),
         ("folder/./nested//item.txt", "folder/nested/item.txt"),
+        ("names/c:notes", "names/c:notes"),
+        ("names\\c:notes", "names/c:notes"),
+        ("safe/C:/marker", "safe/C:/marker"),
+        ("safe/../names/c:notes", "names/c:notes"),
     ] {
         assert_eq!(
             sanitized_archive_path(name)?,
@@ -348,19 +354,25 @@ fn resolver_keeps_nested_members_under_the_same_renamed_root() -> Result<(), Box
 
 #[test]
 fn leaf_conflicts_preserve_native_filename_bytes() -> Result<(), Box<dyn Error>> {
-    let root = tempfile::tempdir()?;
-    let name = PathBuf::from(OsString::from_vec(b"report-\xff.txt".to_vec()));
-    let renamed = PathBuf::from(OsString::from_vec(b"report-\xff (2).txt".to_vec()));
-    fs::write(root.path().join(&name), b"original")?;
-    let destination = ExtractionDestination::open(root.path())?;
-    let (mut file, created) = put_file(&destination, &name)?;
-    file.write_all(b"new")?;
-    drop(file);
-    assert_eq!(created, renamed);
-    assert_eq!(fs::read(root.path().join(&name))?, b"original");
-    assert_eq!(fs::read(root.path().join(&created))?, b"new");
-    destination.remove_file(&created)?;
-    assert!(!root.path().join(&created).exists());
+    let rows: [(&[u8], &[u8]); 2] = [
+        (b"report-\xff.txt", b"report-\xff (2).txt"),
+        (b"readme.", b"readme. (2)"),
+    ];
+    for (name, renamed) in rows {
+        let root = tempfile::tempdir()?;
+        let name = PathBuf::from(OsString::from_vec(name.to_vec()));
+        let renamed = PathBuf::from(OsString::from_vec(renamed.to_vec()));
+        fs::write(root.path().join(&name), b"original")?;
+        let destination = ExtractionDestination::open(root.path())?;
+        let (mut file, created) = put_file(&destination, &name)?;
+        file.write_all(b"new")?;
+        drop(file);
+        assert_eq!(created, renamed);
+        assert_eq!(fs::read(root.path().join(&name))?, b"original");
+        assert_eq!(fs::read(root.path().join(&created))?, b"new");
+        destination.remove_file(&created)?;
+        assert!(!root.path().join(&created).exists());
+    }
     Ok(())
 }
 

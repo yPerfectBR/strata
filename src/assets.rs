@@ -51,6 +51,7 @@ pub mod icons {
     pub const FOLDER: &str = "strata-folder";
     pub const FOLDER_ARCHIVE: &str = "strata-folder-archive";
     pub const FOLDER_INPUT: &str = "strata-folder-input";
+    pub const FOLDER_LOCK: &str = "strata-folder-lock";
     pub const FOLDER_OPEN: &str = "strata-folder-open";
     pub const FOLDER_OUTPUT: &str = "strata-folder-output";
     pub const FOLDER_PLUS: &str = "strata-folder-plus";
@@ -75,6 +76,7 @@ pub mod icons {
     pub const LOCK_OPEN: &str = "strata-lock-open";
     pub const KEY: &str = "strata-key";
     pub const KEY_ROUND: &str = "strata-key-round";
+    pub const KEYBOARD: &str = "strata-keyboard";
     pub const MONITOR: &str = "strata-monitor";
     pub const NETWORK: &str = "strata-network";
     pub const PALETTE: &str = "strata-palette";
@@ -91,12 +93,13 @@ pub mod icons {
     pub const SKIP_BACK: &str = "strata-skip-back";
     pub const SKIP_FORWARD: &str = "strata-skip-forward";
     pub const MINUS: &str = "strata-minus";
+    pub const MINUS_SYMBOLIC: &str = "strata-minus-symbolic";
     pub const MUSIC: &str = "strata-music-2";
     pub const PLUS: &str = "strata-plus";
+    pub const PLUS_SYMBOLIC: &str = "strata-plus-symbolic";
     pub const PRESENTATION: &str = "strata-presentation";
     pub const PRINTER: &str = "strata-printer";
     pub const PICTURES: &str = "strata-image";
-    pub const ROWS: &str = "strata-rows";
     pub const ROUTE: &str = "strata-route";
     pub const SCISSORS: &str = "strata-scissors";
     pub const SEARCH: &str = "strata-search";
@@ -264,6 +267,7 @@ pub fn set_catppuccin_theme_colors(enabled: bool) {
 }
 
 pub fn prepare() -> Result<(), Box<dyn std::error::Error>> {
+    let _startup = crate::util::ui_thread::allow(crate::util::ui_thread::Exception::Startup);
     gio::resources_register_include!("strata.gresource")?;
 
     let font_directory = glib::user_cache_dir()
@@ -370,6 +374,26 @@ pub fn chrome_icon(name: &str) -> gtk::Image {
     image.set_halign(gtk::Align::Center);
     image.set_valign(gtk::Align::Center);
     image
+}
+
+/// GTK names spin button steps after the desktop icon theme; the bundled
+/// symbolic icons still follow each button's CSS color and state.
+pub fn use_bundled_spin_icons(root: &impl IsA<gtk::Widget>) {
+    let root = root.as_ref();
+    let spin = root.is::<gtk::SpinButton>();
+    let mut child = root.first_child();
+    while let Some(widget) = child {
+        child = widget.next_sibling();
+        if !spin {
+            use_bundled_spin_icons(&widget);
+        } else if let Some(button) = widget.downcast_ref::<gtk::Button>() {
+            if button.has_css_class("up") {
+                button.set_icon_name(icons::PLUS_SYMBOLIC);
+            } else if button.has_css_class("down") {
+                button.set_icon_name(icons::MINUS_SYMBOLIC);
+            }
+        }
+    }
 }
 
 pub fn set_primary_icon(image: &gtk::Image, name: &str) {

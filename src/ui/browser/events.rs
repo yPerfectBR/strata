@@ -226,7 +226,7 @@ impl ViewState {
                         .collect();
                     if !filled.is_empty() {
                         column.bound_rows.borrow_mut().retain(|bound| {
-                            let (Some(item), Some(_row)) =
+                            let (Some(item), Some(row)) =
                                 (bound.item.upgrade(), bound.row.upgrade())
                             else {
                                 return false;
@@ -235,6 +235,21 @@ impl ViewState {
                             if let Some(position) = position
                                 && let Some(&entry) = filled.get(&position)
                             {
+                                if entry.is_locked_folder() {
+                                    if let Some(icon) =
+                                        row.first_child()
+                                            .and_downcast::<crate::ui::thumbnail::ThumbnailSlot>()
+                                    {
+                                        crate::ui::thumbnail::show_locked_folder(&icon);
+                                    }
+                                    if let Some(label) = bound.rename_label.upgrade() {
+                                        crate::ui::accessibility::describe_entry(
+                                            &item,
+                                            &label.label(),
+                                            Some(entry),
+                                        );
+                                    }
+                                }
                                 let size = &bound.size;
                                 let text = column_size_text(Some(entry));
                                 let actively_renaming = bound.edit.is_editing();
@@ -348,6 +363,14 @@ impl ViewState {
                     column.spinner.set_visible(true);
                     column.spinner.start();
                     set_column_busy(column, true);
+                }
+            }
+            BrowserEvent::ColumnNotResponding {
+                depth,
+                not_responding,
+            } => {
+                if let Some(column) = self.columns.borrow().get(*depth) {
+                    column.not_responding.set_visible(*not_responding);
                 }
             }
             BrowserEvent::ColumnReloaded { depth } => {
@@ -509,7 +532,11 @@ impl ViewState {
                     }
                 }
             }
-            BrowserEvent::LoadFailed { depth, message } => {
+            BrowserEvent::LoadFailed {
+                depth,
+                message,
+                administrator,
+            } => {
                 if let Some(location) = self.browser.location_at(*depth) {
                     crate::ui::preferences::PreferenceManager::shared()
                         .forget_missing_folder(&location);
@@ -521,10 +548,13 @@ impl ViewState {
                         column.syncing_selection.set(false);
                     }
                     stop_column_spinner(column);
-                    column.presentation.show_error(&rust_i18n::t!(
-                        "Unable to read this directory\n%{message}",
-                        message = message
-                    ));
+                    column.presentation.show_error(
+                        &rust_i18n::t!(
+                            "Unable to read this directory\n%{message}",
+                            message = message
+                        ),
+                        administrator.is_some(),
+                    );
                     set_column_busy(column, false);
                 }
             }
@@ -552,10 +582,13 @@ impl ViewState {
                 if let Some(peek) = self.peek.borrow().as_ref() {
                     peek.spinner.stop();
                     peek.spinner.set_visible(false);
-                    peek.presentation.show_error(&rust_i18n::t!(
-                        "Unable to read this directory\n%{message}",
-                        message = message
-                    ));
+                    peek.presentation.show_error(
+                        &rust_i18n::t!(
+                            "Unable to read this directory\n%{message}",
+                            message = message
+                        ),
+                        false,
+                    );
                 }
             }
             BrowserEvent::PeekClosed => self.close_peek_visual(),
@@ -685,6 +718,9 @@ impl ViewState {
             }
             BrowserEvent::RenameCompleted { request_id } => {
                 self.complete_pending_rename(*request_id);
+                if let Some(recovered) = self.take_recovered_item() {
+                    self.rename_created_entry(&recovered);
+                }
                 self.prune_stale_search_results();
                 self.finish_keyboard_refocus(
                     super::file_commands::KeyboardRefocus::Rename(*request_id),
@@ -693,12 +729,18 @@ impl ViewState {
             }
             BrowserEvent::RenameAbandoned { request_id } => {
                 self.abandon_pending_rename(*request_id);
+                if self.take_recovered_item().is_some() {
+                    self.cancel_new_entry();
+                }
             }
             BrowserEvent::RenameFailed {
                 request_id,
                 message,
             } => {
                 self.fail_pending_rename_from_browser(*request_id);
+                if self.take_recovered_item().is_some() {
+                    self.cancel_new_entry();
+                }
                 if let Some(request_id) = request_id {
                     self.finish_keyboard_refocus(
                         super::file_commands::KeyboardRefocus::Rename(*request_id),
@@ -799,9 +841,10 @@ impl ViewState {
                 crate::ui::preferences::PreferenceManager::shared()
                     .forget_folder_views_within(location, *trash_identity);
             }
-            BrowserEvent::ItemRestored { location } => {
-                customization::restore_item_customizations(location);
-                crate::ui::preferences::PreferenceManager::shared().restore_folder_views(location);
+            BrowserEvent::ItemRestored { location, identity } => {
+                customization::restore_item_customizations(location, *identity);
+                crate::ui::preferences::PreferenceManager::shared()
+                    .restore_folder_views(location, *identity);
             }
             BrowserEvent::DeletionStarted { total } => {
                 let browser = self.browser.clone();
@@ -1013,14 +1056,24 @@ impl ViewState {
             }
             BrowserEvent::NavigationRejected {
                 parent_depth,
+                location,
                 error,
             } => {
-                self.handle_navigation_rejected(*parent_depth, error.clone());
+                self.handle_navigation_rejected(*parent_depth, location, error.clone());
             }
             BrowserEvent::EmptyTrashRequested => {
                 self.load_trash_summary();
             }
-            BrowserEvent::LocationNavigationRejected { error } => {
+            BrowserEvent::LeftoverReviewRequested { depth } => {
+                self.show_leftover_review(*depth);
+            }
+            BrowserEvent::LeftoversChanged { depth, announce } => {
+                self.follow_leftovers(*depth, *announce);
+            }
+            BrowserEvent::LocationNavigationRejected {
+                location: rejected,
+                error,
+            } => {
                 let credentials = self.pending_location_credentials.take();
                 match error {
                     LocationValidationError::NotMounted(location) => {
@@ -1037,13 +1090,17 @@ impl ViewState {
                             credentials,
                         );
                     }
+                    LocationValidationError::NotAuthorized => {
+                        self.abandon_deferred_reveal();
+                        self.fail_pending_connect(Some(error.message()));
+                    }
                     error => {
                         self.abandon_deferred_reveal();
                         if !self.fail_pending_connect(Some(error.message())) {
-                            show_error_dialog(
-                                &self.overlay,
+                            self.show_open_failure(
                                 &crate::i18n::tr("Unable to open location"),
-                                &error.message(),
+                                rejected,
+                                error,
                             );
                         }
                     }
@@ -1492,14 +1549,15 @@ impl ViewState {
         self.mode_views.borrow().show_empty_if_empty(depth);
     }
 
-    pub(super) fn prune_stale_search_results(&self) {
+    pub(super) fn prune_stale_search_results(self: &Rc<Self>) {
         let columns = self.columns.borrow().clone();
-        let mut changed = false;
         for column in &columns {
-            changed |= prune_missing_search_results(column);
-        }
-        if changed {
-            self.notify_search_selection_changed();
+            let weak = Rc::downgrade(self);
+            prune_missing_search_results(column, move || {
+                if let Some(state) = weak.upgrade() {
+                    state.notify_search_selection_changed();
+                }
+            });
         }
         self.mode_views.borrow().prune_stale_search_results();
     }
@@ -1539,14 +1597,17 @@ impl ViewState {
         self.pending_mirror.replace(Some(source));
     }
 
-    fn apply_child_mirror(self: &Rc<Self>, depth: usize, position: usize, force: bool) {
+    pub(super) fn apply_child_mirror(self: &Rc<Self>, depth: usize, position: usize, force: bool) {
         let filtered = self
             .columns
             .borrow()
             .get(depth)
             .is_some_and(|column| column.map.has_query());
-        // Opening or closing the child column would end a 10xer range.
+        // Opening or closing the child column would end a 10xer range. A folder
+        // that is still validating will take the focus itself; mirroring it now
+        // would cancel that open.
         if filtered
+            || self.browser.pending_navigation_generation().is_some()
             || self.browser.child_mirror_suppressed()
             || self.browser.visual_kind().is_some()
             || !self.columns_mirror_selection.get()

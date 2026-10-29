@@ -87,6 +87,20 @@ fn remote_permission_denials_are_treated_as_authentication_failures() {
 }
 
 #[test]
+fn a_refused_polkit_prompt_neither_asks_for_credentials_nor_reports_an_error() {
+    let administrator = Location::uri("admin:///run/media/user/drive/backups");
+    let denied = glib::Error::new(gio::IOErrorEnum::PermissionDenied, "Permission denied");
+    assert!(!mount_error_is_authentication_failure(
+        &administrator,
+        &denied
+    ));
+    assert_eq!(mount_failure_message(&administrator, &denied), None);
+
+    let failed = glib::Error::new(gio::IOErrorEnum::Failed, "helper crashed");
+    assert!(mount_failure_message(&administrator, &failed).is_some());
+}
+
+#[test]
 fn cancelling_the_credential_prompt_produces_no_error_message() {
     let location = Location::uri("smb://host/share");
     for kind in [gio::IOErrorEnum::Cancelled, gio::IOErrorEnum::FailedHandled] {
@@ -164,7 +178,10 @@ fn backend_failures_do_not_echo_uri_secrets() {
         "Unable to mount sftp://alice:hunter2@host.example/home/alice?token=hidden#secret",
     );
     let message = mount_failure_message(&location, &error).expect("reportable error");
-    assert!(message.contains("sftp://host.example/home/alice"));
+    assert_eq!(
+        message,
+        crate::i18n::tr(crate::services::UNEXPECTED_SYSTEM_ERROR)
+    );
     assert!(!message.contains("hunter2"));
     assert!(!message.contains("alice:"));
     assert!(!message.contains("hidden"));
@@ -876,12 +893,16 @@ fn breadcrumb_adjustment_does_not_retain_widgets() {
                 Rc::new(crate::adapters::LocalFileSource),
                 crate::ui::browser::PeekBehavior::default(),
             );
-            let adjustment = view.state.breadcrumb_scroller.hadjustment();
             let container = view
                 .state
                 .location_stack
                 .child_by_name("breadcrumbs")
                 .expect("breadcrumb container");
+            let adjustment = descendants(&container)
+                .into_iter()
+                .find_map(|widget| widget.downcast::<gtk::ScrolledWindow>().ok())
+                .expect("breadcrumb scroller")
+                .hadjustment();
             let scrollbar = descendants(&container)
                 .into_iter()
                 .filter(|widget| widget.has_css_class("breadcrumb-scrollbar"))
@@ -1104,4 +1125,67 @@ fn wait_until(condition: impl Fn() -> bool, message: &str) {
         glib::MainContext::default().iteration(false);
         std::thread::sleep(Duration::from_millis(2));
     }
+}
+
+/// A new tab's first load now answers after Ctrl+L can open the entry; the
+/// arriving column must not close the entry or replace what was typed.
+#[test]
+fn a_folder_arriving_while_a_location_is_typed_keeps_the_entry_open() {
+    crate::test_support::gtk_test(
+        "ui::browser::location::tests::a_folder_arriving_while_a_location_is_typed_keeps_the_entry_open",
+        || {
+            let root = tempfile::tempdir().expect("fixture");
+            let later = root.path().join("later");
+            std::fs::create_dir(&later).expect("folder");
+            let view = BrowserView::new(
+                Rc::new(crate::adapters::LocalFileSource),
+                crate::ui::browser::PeekBehavior::default(),
+            );
+            let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            content.append(&view.location_widget());
+            content.append(&view.widget());
+            let window = gtk::Window::builder()
+                .child(&content)
+                .default_width(900)
+                .default_height(600)
+                .build();
+            window.present();
+            let loaded = |depth: usize| {
+                view.browser()
+                    .column_snapshot(depth)
+                    .is_some_and(|snapshot| !snapshot.loading)
+            };
+            view.browser().navigate(Location::local(root.path()));
+            wait_until(|| loaded(0), "the first folder loads");
+            view.browser().focus_active();
+            wait_until(|| view.item_view_has_focus(), "the rows take focus");
+
+            view.browser()
+                .navigate_input_located(&later.to_string_lossy(), None)
+                .expect("a typed folder");
+            view.begin_location_edit();
+            assert!(
+                view.location_has_focus(),
+                "the entry opens before the folder answers"
+            );
+            view.state.location_entry.set_text("/typed/so/far");
+            wait_until(
+                || view.browser().active_location() == Some(Location::local(&later)),
+                "the later folder arrives",
+            );
+            wait_until(|| loaded(0), "the later folder loads");
+
+            assert!(view.location_edit_is_active(), "the entry stays open");
+            assert_eq!(view.state.location_entry.text(), "/typed/so/far");
+
+            view.state.cancel_location_edit();
+            assert!(!view.location_edit_is_active());
+            assert_eq!(
+                view.state.location_entry.text(),
+                Location::local(&later).display_path(),
+                "closing the entry shows the folder that arrived"
+            );
+            window.destroy();
+        },
+    );
 }

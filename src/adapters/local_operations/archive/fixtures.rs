@@ -105,11 +105,12 @@ pub(super) fn test_file_entry(path: &Path) -> FileEntry {
         image_dimensions: MetadataValue::Unknown,
         child_count: MetadataValue::Unknown,
         duration_seconds: MetadataValue::Unknown,
+        listable: MetadataValue::Unknown,
         recent_uri: None,
     }
 }
 
-pub(super) const COMPRESSION_STAGE: &str = ".strata-compression-";
+pub(super) const COMPRESSION_STAGE: &str = ".strata-copy-";
 pub(super) const EXTRACTION_STAGE: &str = ".strata-extraction-";
 
 pub(super) fn stages(destination: &Path, prefix: &str) -> Result<Vec<OsString>, Box<dyn Error>> {
@@ -136,7 +137,7 @@ pub(crate) fn write_compression_fixture(
     password: Option<&str>,
 ) -> Result<usize, String> {
     // The filesystem seam asserts it runs off the main thread.
-    if gtk::glib::MainContext::default().is_owner() {
+    if crate::util::ui_thread::is_current() {
         return std::thread::scope(|scope| {
             scope
                 .spawn(|| write_compression_fixture(path, entries, format, password))
